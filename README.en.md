@@ -19,7 +19,7 @@ OpenCart has no standalone admin handlers that could be called from outside, and
 
 Texts are stored HTML-escaped, exactly like the admin stores them. The OpenCart cache is cleared after every write. No OpenCart file is modified.
 
-Extra columns added by forks are picked up automatically, e.g. `meta_h1` in ocStore.
+Extra columns added by forks are picked up automatically, e.g. `meta_h1` in ocStore. For ocStore the connector also sets the product main category (`main_category`, the `main_category_id` argument) and clears the SEO PRO cache, as the admin does; otherwise new products would get links without the category path.
 
 ## Requirements
 
