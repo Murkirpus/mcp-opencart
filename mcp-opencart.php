@@ -331,6 +331,16 @@ final class Oc
         return self::languages()[$id]['code'] ?? (string)$id;
     }
 
+    /** Stock status for new products: the shop setting, or the one most products use when the setting is missing. */
+    public static function defaultStockStatus(): int
+    {
+        $lid = self::defaultLanguageId();
+        $id = (int)self::setting('config_stock_status_id', 0);
+        if ($id && OcDb::val("SELECT 1 FROM {stock_status} WHERE `stock_status_id` = ? LIMIT 1", [$id])) return $id;
+        $id = (int)OcDb::val("SELECT p.`stock_status_id` FROM {product} p JOIN {stock_status} ss ON (ss.`stock_status_id` = p.`stock_status_id` AND ss.`language_id` = ?) GROUP BY p.`stock_status_id` ORDER BY COUNT(*) DESC LIMIT 1", [$lid]);
+        return $id ?: (int)OcDb::val("SELECT MIN(`stock_status_id`) FROM {stock_status}");
+    }
+
     public static function customerGroupId(): int
     {
         return (int)self::setting('config_customer_group_id', 1);
@@ -813,7 +823,7 @@ final class OcProduct
 
         if ($create) {
             $data += [
-                'model' => '', 'location' => '', 'quantity' => 1, 'minimum' => 1, 'subtract' => 1, 'stock_status_id' => (int)Oc::setting('config_stock_status_id', 0),
+                'model' => '', 'location' => '', 'quantity' => 1, 'minimum' => 1, 'subtract' => 1, 'stock_status_id' => Oc::defaultStockStatus(),
                 'date_available' => date('Y-m-d'), 'manufacturer_id' => 0, 'shipping' => 1, 'price' => 0, 'points' => 0, 'weight' => 0,
                 'weight_class_id' => (int)Oc::setting('config_weight_class_id', 1), 'length' => 0, 'width' => 0, 'height' => 0,
                 'length_class_id' => (int)Oc::setting('config_length_class_id', 1), 'status' => 1, 'tax_class_id' => 0, 'sort_order' => 0, 'image' => '',
