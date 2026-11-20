@@ -645,7 +645,11 @@ final class Oc
             CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
             CURLOPT_CONNECTTIMEOUT => 10,
             CURLOPT_TIMEOUT => 40,
-            CURLOPT_USERAGENT => 'Mozilla/5.0 (OpenCart MCP image fetcher)',
+            // a regular browser profile: CDNs of brand sites (Sony, Akamai) answer 403 to unknown clients
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+            CURLOPT_HTTPHEADER => ['Accept: image/avif,image/webp,image/apng,image/*,*/*;q=0.8', 'Accept-Language: en-US,en;q=0.9'],
+            CURLOPT_REFERER => $parts['scheme'] . '://' . $parts['host'] . '/',
+            CURLOPT_ENCODING => '',
             CURLOPT_NOPROGRESS => false,
             CURLOPT_PROGRESSFUNCTION => static fn($c, $dlTotal, $dl) => $dl > 20 * 1024 * 1024 ? 1 : 0,
         ]);
@@ -697,13 +701,15 @@ final class Oc
 
     public static function clearCache(string $prefix = ''): int
     {
+        // ocStore SEO PRO caches keywords, paths and product categories: the admin clears it after every catalog change
+        $extra = ($prefix !== '' && $prefix !== 'seopro') ? self::clearCache('seopro') : 0;
         $dir = defined('DIR_CACHE') ? DIR_CACHE : (defined('DIR_STORAGE') ? DIR_STORAGE . 'cache/' : '');
         if ($dir === '' || !is_dir($dir)) return 0;
         $n = 0;
         foreach (glob(rtrim($dir, '/') . '/cache.' . ($prefix !== '' ? $prefix . '.' : '') . '*') ?: [] as $f) {
             if (is_file($f) && @unlink($f)) $n++;
         }
-        return $n;
+        return $n + $extra;
     }
 
     public static function money($value, string $code = '', float $rate = 1.0): string
@@ -807,7 +813,7 @@ final class OcProduct
     }
 
     /** Main columns of oc_product from the arguments. */
-    private static function columns(bool $create): array
+    private static function columns(bool $create, string $imageName = ''): array
     {
         $data = [];
         foreach (self::NUM as $f => $type) {
@@ -819,7 +825,7 @@ final class OcProduct
         if (!Oc::$codeTable) foreach (self::CODES as $f) if (Mcp::has($f)) $data[$f] = (string)Mcp::arg($f);
 
         if (Mcp::has('manufacturer') && !Mcp::has('manufacturer_id')) $data['manufacturer_id'] = OcManufacturer::findOrCreate((string)Mcp::arg('manufacturer'));
-        if (Mcp::has('image')) $data['image'] = Oc::image(Mcp::arg('image'), (string)Mcp::arg('name', ''));
+        if (Mcp::has('image')) $data['image'] = Oc::image(Mcp::arg('image'), $imageName);
 
         if ($create) {
             $data += [
@@ -847,18 +853,23 @@ final class OcProduct
             $known = array_map('intval', OcDb::col("SELECT `category_id` FROM {category} WHERE `category_id` IN (" . OcDb::in($cats) . ")"));
             if ($missing = array_diff($cats, $known)) throw new McpFail('Unknown category id(s): ' . implode(', ', $missing));
         }
+        $imageName = (string)Mcp::arg('name', '');
+        if ($imageName === '' && !$create) $imageName = Mcp::dec((string)OcDb::val("SELECT `name` FROM {product_description} WHERE `product_id` = ? ORDER BY `language_id` = ? DESC LIMIT 1", [$id, Oc::defaultLanguageId()]));
         $paths = null;
         if (Mcp::has('images')) {
             $list = Mcp::arg('images');
             if (!is_array($list)) throw new McpFail('"images" must be an array of URLs or paths.');
             $paths = [];
-            foreach (array_values($list) as $n => $img) if (trim((string)$img) !== '') $paths[] = Oc::image($img, Mcp::arg('name', 'product-' . ($id ?? 'new')) . '-' . ($n + 1));
+            foreach (array_values($list) as $n => $img) if (trim((string)$img) !== '') $paths[] = Oc::image($img, ($imageName !== '' ? $imageName : 'product-' . ($id ?? 'new')) . '-' . ($n + 1));
+        }
+        if (Mcp::has('main_category_id') && (int)Mcp::arg('main_category_id') && !OcDb::val("SELECT 1 FROM {category} WHERE `category_id` = ?", [(int)Mcp::arg('main_category_id')])) {
+            throw new McpFail('Unknown main_category_id: ' . (int)Mcp::arg('main_category_id'));
         }
         if (Mcp::has('attributes') && !is_array(Mcp::arg('attributes'))) throw new McpFail('"attributes" must be an object {"attribute id or name": "value"}.');
         Oc::validateLanguageArgs();
         if (Mcp::has('stores') && !Mcp::ids(Mcp::arg('stores'))) throw new McpFail('"stores" must contain at least one store id.');
 
-        $data = self::columns($create);
+        $data = self::columns($create, $imageName);
         $data['date_modified'] = date('Y-m-d H:i:s');
 
         OcDb::$pdo->beginTransaction();
@@ -892,6 +903,20 @@ final class OcProduct
             if ($cats !== null) {
                 OcDb::delete('product_to_category', ['product_id' => $id]);
                 foreach ($cats as $c) OcDb::insert('product_to_category', ['product_id' => $id, 'category_id' => $c]);
+            }
+
+            // ocStore: the main category drives breadcrumbs and SEO PRO paths (admin: chosen one or the first category)
+            if (OcDb::hasCol('product_to_category', 'main_category') && ($cats !== null || Mcp::has('main_category_id'))) {
+                $main = Mcp::has('main_category_id') ? (int)Mcp::arg('main_category_id') : ($cats[0] ?? 0);
+                if ($main && !OcDb::val("SELECT 1 FROM {product_to_category} WHERE `product_id` = ? AND `category_id` = ?", [$id, $main])) {
+                    OcDb::insert('product_to_category', ['product_id' => $id, 'category_id' => $main]);
+                }
+                OcDb::q("UPDATE {product_to_category} SET `main_category` = IF(`category_id` = ?, 1, 0) WHERE `product_id` = ?", [$main, $id]);
+            }
+
+            // like the admin form: an explicit "default layout" row per store
+            if ($create && OcDb::hasTable('product_to_layout')) {
+                foreach ($stores ?? [0] as $s) OcDb::insert('product_to_layout', ['product_id' => $id, 'store_id' => $s, 'layout_id' => 0]);
             }
 
             // additional images
@@ -1654,6 +1679,7 @@ final class OcTools
             'image' => $s('Main image: an http(s) URL (downloaded into the shop) or a path relative to image/ ("catalog/demo/x.jpg").'),
             'images' => ['type' => 'array', 'items' => ['type' => 'string'], 'description' => 'Additional images (URLs or paths). Replaces the current list.'],
             'categories' => $ints('Category ids (see category_list). Replaces the current list.'),
+            'main_category_id' => $i('Main category (ocStore: breadcrumbs and SEO paths). Default: the first of "categories".'),
             'manufacturer_id' => $i('Manufacturer id.'),
             'manufacturer' => $s('Manufacturer name: found or created automatically.'),
             'attributes' => ['type' => 'object', 'description' => 'Attributes: {"attribute id or name": "value"} (value may be {"uk-ua": "...", "ru-ru": "..."}). Unknown names are created. Empty value removes the attribute.'],
